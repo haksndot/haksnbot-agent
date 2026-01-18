@@ -2,6 +2,8 @@
 
 An autonomous Minecraft bot powered by [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python). The bot connects to a Minecraft server, responds to player chat, and plays the game autonomously - surviving, building, crafting, and helping other players.
 
+> **Part of the Haksnbot suite:** This is the core agent for [Haksnbot](https://github.com/haksndot), an autonomous Minecraft bot. The suite includes four repos that work together: [haksnbot-tools](https://github.com/haksndot/haksnbot-tools) (Minecraft bot control), [haksnbot-agent](https://github.com/haksndot/haksnbot-agent) (this repo - the autonomous agent), [haksnbot-admin](https://github.com/haksndot/haksnbot-admin) (server administration), and [haksnbot-memory](https://github.com/haksndot/haksnbot-memory) (persistent memory). The agent requires haksnbot-tools; the others are optional.
+
 ## Features
 
 - **Autonomous gameplay** - Survives, gathers resources, crafts tools, builds shelter
