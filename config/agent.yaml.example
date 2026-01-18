@@ -1,0 +1,39 @@
+# Agent Configuration
+#
+# Copy this file and fill in the required fields before running the agent.
+
+minecraft:
+  # REQUIRED: Minecraft server address
+  host: ""
+  port: 25565
+
+  # REQUIRED: Bot username
+  # For online-mode servers: your Microsoft account email (e.g. "bot@outlook.com")
+  # For offline-mode servers: any username (e.g. "MyBot")
+  username: ""
+
+  # REQUIRED: Minecraft version (e.g. "1.21.8", "1.20.4")
+  version: ""
+
+  # Authentication type: "microsoft" for online-mode, omit for offline-mode
+  # auth: microsoft
+
+claude:
+  # Model to use (default: claude-sonnet-4-20250514)
+  model: claude-sonnet-4-20250514
+  max_tokens: 1024
+
+behavior:
+  respond_to_mentions: true
+  greet_on_join: false
+  message_batch_delay_ms: 3000
+
+reconnect:
+  enabled: true
+  initial_delay_ms: 5000
+  max_delay_ms: 300000
+  backoff_multiplier: 2
+
+logging:
+  level: INFO
+  file: data/agent.log
