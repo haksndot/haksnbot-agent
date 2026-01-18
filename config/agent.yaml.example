@@ -18,6 +18,10 @@ minecraft:
   # Authentication type: "microsoft" for online-mode, omit for offline-mode
   # auth: microsoft
 
+  # Path to Minecraft server directory (for QuickShop integration)
+  # Required for shop tools: list_all_shops, search_shops
+  # server_root: /home/user/minecraft-server
+
 claude:
   # Model to use (default: claude-sonnet-4-20250514)
   model: claude-sonnet-4-20250514

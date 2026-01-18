@@ -148,6 +148,9 @@ class HaksnbotAgent:
         # Only set auth if specified (omit for offline-mode)
         if mc_config.get("auth"):
             mcp_env["MC_AUTH"] = mc_config.get("auth")
+        # Server root for QuickShop integration
+        if mc_config.get("server_root"):
+            mcp_env["MC_SERVER_ROOT"] = mc_config.get("server_root")
 
         options = ClaudeAgentOptions(
             mcp_servers={
