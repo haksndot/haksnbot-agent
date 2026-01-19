@@ -8,6 +8,7 @@ Uses chat-poll.sh for event detection, minecraft-mcp for bot actions.
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -320,38 +321,33 @@ class HaksnbotAgent:
         return self.parse_log_line(line)
 
     def parse_log_line(self, line: str) -> Optional[dict]:
-        """Parse a Minecraft server log line into an event."""
+        """Parse a Minecraft server log line into an event.
+
+        We forward everything to Claude and let it decide what's relevant.
+        Join/leave events are still detected for logging purposes.
+        """
         # Extract message content after "]: "
         if "]: " in line:
             content = line.split("]: ", 1)[-1]
         else:
             content = line
 
-        # Chat message: <Player> message
-        if "<" in content and ">" in content:
-            try:
-                start = content.index("<") + 1
-                end = content.index(">")
-                username = content[start:end]
-                message = content[end + 2:]  # Skip "> "
-                return {"type": "chat", "username": username, "message": message}
-            except ValueError:
-                pass
+        if not content.strip():
+            return None
 
-        # Player joined
+        # Detect join/leave for logging (but still forward to Claude)
         if "joined the game" in content:
             username = content.replace(" joined the game", "").strip()
             return {"type": "player_join", "username": username}
 
-        # Player left
         if "left the game" in content:
             username = content.replace(" left the game", "").strip()
             return {"type": "player_leave", "username": username}
 
-        # System message (command output, deaths, achievements, plugin messages, etc.)
-        # Forward anything else that's not empty
-        if content.strip():
-            return {"type": "system", "message": content.strip()}
+        # Forward everything else as server activity
+        # Claude will see: chat messages, Discord messages, deaths, achievements,
+        # command output, plugin messages, etc.
+        return {"type": "activity", "content": content.strip()}
 
     def log_sdk_message(self, msg):
         """Log SDK message in human-readable format."""
@@ -396,43 +392,25 @@ class HaksnbotAgent:
         else:
             logger.debug(f"[{msg_type}] {msg}")
 
-    async def handle_chat(self, username: str, message: str):
-        """Handle a chat message from a player."""
-        logger.info(f"[Chat] <{username}> {message}")
+    async def handle_activity(self, content: str):
+        """Handle server activity - forward everything to Claude."""
+        logger.info(f"[Server] {content}")
 
         if not self.client:
             logger.warning("No Claude client available")
             return
 
-        # Send to Claude
-        prompt = f"Player message in Minecraft chat:\n[{username}]: {message}"
+        # Forward raw server log content to Claude
+        prompt = f"Server log:\n{content}"
 
         try:
             await self.client.query(prompt)
 
-            # Process response (Claude will use chat tool to respond)
+            # Process response (Claude will decide if/how to respond)
             async for msg in self.client.receive_response():
                 self.log_sdk_message(msg)
         except Exception as e:
             logger.error(f"Error getting Claude response: {e}")
-
-    async def handle_system(self, message: str):
-        """Handle a system message (command output, deaths, plugin messages, etc.)."""
-        logger.info(f"[System] {message}")
-
-        if not self.client:
-            return
-
-        # Forward to Claude so it can see command responses
-        prompt = f"System message in Minecraft:\n{message}"
-
-        try:
-            await self.client.query(prompt)
-
-            async for msg in self.client.receive_response():
-                self.log_sdk_message(msg)
-        except Exception as e:
-            logger.error(f"Error handling system message: {e}")
 
     async def run(self):
         """Main event loop."""
@@ -453,20 +431,18 @@ class HaksnbotAgent:
 
                 event_type = event.get("type")
 
-                if event_type == "chat":
-                    await self.handle_chat(
-                        event.get("username", ""),
-                        event.get("message", "")
-                    )
-
-                elif event_type == "system":
-                    await self.handle_system(event.get("message", ""))
+                if event_type == "activity":
+                    await self.handle_activity(event.get("content", ""))
 
                 elif event_type == "player_join":
+                    # Log locally, but also forward to Claude
                     logger.info(f"Player joined: {event.get('username')}")
+                    await self.handle_activity(f"{event.get('username')} joined the game")
 
                 elif event_type == "player_leave":
+                    # Log locally, but also forward to Claude
                     logger.info(f"Player left: {event.get('username')}")
+                    await self.handle_activity(f"{event.get('username')} left the game")
 
                 elif event_type == "timeout":
                     # No events in 60s, just continue
