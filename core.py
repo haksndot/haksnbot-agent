@@ -31,6 +31,7 @@ REPO_DIR = AGENT_DIR.parent
 MINECRAFT_MCP = REPO_DIR / "minecraft-mcp" / "src" / "index.js"
 SERVER_ADMIN_MCP = REPO_DIR / "server-admin-mcp" / "src" / "index.js"
 MEMORY_MCP = REPO_DIR / "memory-mcp" / "src" / "index.js"
+MAP_MCP = REPO_DIR / "map-mcp" / "src" / "index.js"
 CHAT_POLL = REPO_DIR / "chat-poll.sh"
 
 # Configure logging
@@ -170,6 +171,11 @@ class HaksnbotAgent:
                     "type": "stdio",
                     "command": "node",
                     "args": [str(MEMORY_MCP)],
+                },
+                "map": {
+                    "type": "stdio",
+                    "command": "node",
+                    "args": [str(MAP_MCP)],
                 }
             },
             allowed_tools=[
@@ -247,6 +253,21 @@ class HaksnbotAgent:
                 "mcp__memory__list_memories",
                 "mcp__memory__search_memories",
                 "mcp__memory__get_memory_stats",
+                # Map tools (location storage and spatial queries)
+                "mcp__map__save_location",
+                "mcp__map__get_location",
+                "mcp__map__list_locations",
+                "mcp__map__delete_location",
+                "mcp__map__search_locations",
+                "mcp__map__find_by_tags",
+                "mcp__map__list_tags",
+                "mcp__map__get_distance",
+                "mcp__map__find_nearest",
+                "mcp__map__find_in_radius",
+                "mcp__map__get_nether_coords",
+                "mcp__map__add_tags",
+                "mcp__map__remove_tags",
+                "mcp__map__get_location_stats",
             ],
             system_prompt=load_system_prompt(),
             model=claude_config.get("model", "claude-sonnet-4-20250514"),
