@@ -156,12 +156,14 @@ class HaksnbotAgent:
         claude_config = self.config.get("claude", {})
 
         # Environment variables for the MCP server
+        # Defer connection so bot only appears online after init is complete
         mcp_env = {
             **os.environ,
             "MC_HOST": mc_config.get("host"),
             "MC_PORT": str(mc_config.get("port", 25565)),
             "MC_USERNAME": mc_config.get("username"),
             "MC_VERSION": mc_config.get("version"),
+            "MC_DEFER_CONNECT": "1",
         }
         # Only set auth if specified (omit for offline-mode)
         if mc_config.get("auth"):
@@ -293,19 +295,33 @@ class HaksnbotAgent:
         await self.client.__aenter__()
         logger.info("Claude SDK client initialized with minecraft-mcp")
 
-        # MCP server auto-connects using env vars, just give Claude initial context
+        # Phase 1: Do initialization (memory check, etc.) BEFORE connecting
+        # Bot is NOT online yet, so no one is waiting for responses
         await self.client.query(
-            "You are now connected to the Minecraft server as Haksnbot. "
-            "You are ready to assist players. When players mention 'haksnbot' in chat, "
-            "respond helpfully using the chat tool."
+            "You are Haksnbot, starting up. Do your startup initialization now "
+            "(check your memory bank, recall recent context). "
+            "Do NOT connect to the server yet - you'll be instructed to connect after init."
         )
         logger.info("Waiting for Claude init response...")
         async for msg in self.client.receive_response():
             logger.info(f"Init response: {type(msg).__name__}")
             self.log_sdk_message(msg)
 
-        logger.info("Bot connected to Minecraft server")
-        self.running = True
+        logger.info("Init complete, connecting to server...")
+
+        # Phase 2: Connect to server - this should be fast (just one tool call)
+        mc_config = self.config.get("minecraft", {})
+        auth_param = f", auth='microsoft'" if mc_config.get("auth") == "microsoft" else ""
+        await self.client.query(
+            f"Connect to the Minecraft server now. Call the connect tool with: "
+            f"host='{mc_config.get('host')}', username='{mc_config.get('username')}', "
+            f"version='{mc_config.get('version')}', port={mc_config.get('port', 25565)}{auth_param}. "
+            f"Do this immediately."
+        )
+        async for msg in self.client.receive_response():
+            self.log_sdk_message(msg)
+
+        logger.info("Claude initialization complete")
 
     async def stop(self):
         """Stop the agent."""
@@ -476,15 +492,14 @@ class HaksnbotAgent:
 
     async def run(self):
         """Main event loop with dual-stream log tailing."""
-        await self.start()
-
-        if not self.running:
-            return
+        # Set running=True early so reader tasks don't exit immediately
+        self.running = True
 
         # Create event queue for both log streams
         self.event_queue = asyncio.Queue()
 
-        # Start tail processes for both logs
+        # Start tail processes BEFORE start() so we capture events during init
+        # Any messages that arrive while Claude is doing init will be queued
         self.server_tail = await self.start_tail(SERVER_LOG)
         self.bot_tail = await self.start_tail(BOT_LOG)
 
@@ -495,6 +510,42 @@ class HaksnbotAgent:
         bot_reader = asyncio.create_task(
             self.tail_reader(self.bot_tail, "bot")
         )
+
+        logger.info("Event infrastructure ready, starting agent...")
+
+        # Do initialization (bot connects automatically, Claude does memory check, etc.)
+        # Events during this time are captured by the tails and queued
+        try:
+            await self.start()
+        except Exception as e:
+            logger.error(f"Failed to start: {e}")
+            self.running = False
+            server_reader.cancel()
+            bot_reader.cancel()
+            for proc in [self.server_tail, self.bot_tail]:
+                if proc:
+                    proc.terminate()
+            return
+
+        if not self.client:
+            logger.error("Client not initialized")
+            self.running = False
+            server_reader.cancel()
+            bot_reader.cancel()
+            for proc in [self.server_tail, self.bot_tail]:
+                if proc:
+                    proc.terminate()
+            return
+
+        logger.info("Checking for any missed messages during startup...")
+
+        # Catch up on any messages that might have been sent during init
+        await self.client.query(
+            "Check get_chat_history (last 10-20 messages) for any messages you might have missed during startup. "
+            "If anyone mentioned 'haksnbot' recently, respond to them now."
+        )
+        async for msg in self.client.receive_response():
+            self.log_sdk_message(msg)
 
         logger.info("Entering main event loop (dual-stream)...")
 

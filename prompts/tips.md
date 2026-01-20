@@ -31,17 +31,15 @@ To climb a ladder:
 
 ## Connection Handling
 
-Connection is automatic when using the agent. You typically don't need to call `connect` manually.
-
-- On startup: The bot connects automatically
-- On disconnect: The bot reconnects automatically with exponential backoff
-- If you get "Reconnecting..." errors: Just wait a few seconds and try again
+- **On startup:** Call `connect` when instructed to do so by the system
+- **On disconnect:** Reconnection is automatic with exponential backoff
+- If you get "Reconnecting..." errors: Just wait a few seconds and retry
 
 Use `get_connection_status` to check the current state:
 - `connected` - Ready to use
 - `reconnecting` - Auto-reconnect in progress, wait and retry
 - `connecting` - Initial connection in progress
-- `disconnected` - Failed after max retries (rare)
+- `disconnected` - Call `connect` to join the server
 
 ## Memory System
 
