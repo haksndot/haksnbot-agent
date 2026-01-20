@@ -44,6 +44,7 @@ SKIP_PATTERNS = [
     "lost connection:",        # Disconnect details
     "GameProfile",             # Auth details
     "[QuickShop-Hikari]",      # Plugin spam
+    "[Essentials]",            # Essentials plugin output (sell, balance, etc.)
     "CONSOLE issued",          # Console commands
 ]
 
