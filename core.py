@@ -2,7 +2,7 @@
 Haksnbot Agent Core
 
 Persistent agent using Claude Agent SDK with existing minecraft-mcp tools.
-Uses chat-poll.sh for event detection, minecraft-mcp for bot actions.
+Uses persistent tail on server log for event detection, minecraft-mcp for bot actions.
 """
 
 import asyncio
@@ -32,7 +32,18 @@ MINECRAFT_MCP = REPO_DIR / "minecraft-mcp" / "src" / "index.js"
 SERVER_ADMIN_MCP = REPO_DIR / "server-admin-mcp" / "src" / "index.js"
 MEMORY_MCP = REPO_DIR / "memory-mcp" / "src" / "index.js"
 MAP_MCP = REPO_DIR / "map-mcp" / "src" / "index.js"
-CHAT_POLL = REPO_DIR / "chat-poll.sh"
+LOG_FILE = Path("/home/haksndot/server/logs/latest.log")
+
+# Patterns to filter out (private/technical noise)
+SKIP_PATTERNS = [
+    "issued server command:",  # Player commands (private)
+    "UUID of player",          # Connection technical details
+    "logged in with entity id", # Login coordinates
+    "lost connection:",        # Disconnect details
+    "GameProfile",             # Auth details
+    "[QuickShop-Hikari]",      # Plugin spam
+    "CONSOLE issued",          # Console commands
+]
 
 # Configure logging
 logging.basicConfig(
@@ -117,7 +128,7 @@ class HaksnbotAgent:
         self.config = config or load_config()
         self.client: Optional[ClaudeSDKClient] = None
         self.running = False
-        self.poll_process: Optional[asyncio.subprocess.Process] = None
+        self.tail_process: Optional[asyncio.subprocess.Process] = None
 
     async def start(self):
         """Start the agent."""
@@ -296,10 +307,13 @@ class HaksnbotAgent:
         logger.info("Stopping Haksnbot Agent...")
         self.running = False
 
-        # Stop chat poll process
-        if self.poll_process:
-            self.poll_process.terminate()
-            await self.poll_process.wait()
+        # Stop tail process
+        if self.tail_process:
+            self.tail_process.terminate()
+            try:
+                await asyncio.wait_for(self.tail_process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.tail_process.kill()
 
         # Close SDK client (MCP server terminates and bot disconnects automatically)
         if self.client:
@@ -307,45 +321,36 @@ class HaksnbotAgent:
 
         logger.info("Haksnbot Agent stopped")
 
-    async def start_chat_poll(self) -> asyncio.subprocess.Process:
-        """Start chat-poll.sh in background."""
+    async def start_log_tail(self) -> asyncio.subprocess.Process:
+        """Start persistent tail -f on server log."""
         process = await asyncio.create_subprocess_exec(
-            str(CHAT_POLL),
+            "tail", "-n", "0", "-f", str(LOG_FILE),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        logger.info(f"Started tail process on {LOG_FILE}")
         return process
 
-    async def wait_for_event(self) -> Optional[dict]:
-        """Wait for next chat/join/leave event from chat-poll.sh."""
-        self.poll_process = await self.start_chat_poll()
+    def should_forward_line(self, line: str) -> bool:
+        """Check if a log line should be forwarded to Claude.
 
-        try:
-            stdout, _ = await asyncio.wait_for(
-                self.poll_process.communicate(),
-                timeout=60.0
-            )
-        except asyncio.TimeoutError:
-            self.poll_process.terminate()
-            return {"type": "timeout"}
+        Filters out private/technical noise, only forwards public activity.
+        """
+        # Only forward INFO lines
+        if "/INFO]: " not in line:
+            return False
 
-        if not stdout:
-            return None
+        # Skip lines matching any skip pattern
+        for pattern in SKIP_PATTERNS:
+            if pattern in line:
+                return False
 
-        line = stdout.decode().strip()
-        if not line:
-            return None
-
-        # Parse the log line
-        # Format: [HH:MM:SS] [Server thread/INFO]: <Player> message
-        # Or: [HH:MM:SS] [Server thread/INFO]: Player joined the game
-        return self.parse_log_line(line)
+        return True
 
     def parse_log_line(self, line: str) -> Optional[dict]:
         """Parse a Minecraft server log line into an event.
 
-        We forward everything to Claude and let it decide what's relevant.
-        Join/leave events are still detected for logging purposes.
+        Extract the content and detect join/leave for logging purposes.
         """
         # Extract message content after "]: "
         if "]: " in line:
@@ -356,18 +361,16 @@ class HaksnbotAgent:
         if not content.strip():
             return None
 
-        # Detect join/leave for logging (but still forward to Claude)
+        # Detect join/leave for logging (but still forward to Claude as activity)
         if "joined the game" in content:
             username = content.replace(" joined the game", "").strip()
-            return {"type": "player_join", "username": username}
+            return {"type": "player_join", "username": username, "content": content.strip()}
 
         if "left the game" in content:
             username = content.replace(" left the game", "").strip()
-            return {"type": "player_leave", "username": username}
+            return {"type": "player_leave", "username": username, "content": content.strip()}
 
         # Forward everything else as server activity
-        # Claude will see: chat messages, Discord messages, deaths, achievements,
-        # command output, plugin messages, etc.
         return {"type": "activity", "content": content.strip()}
 
     def log_sdk_message(self, msg):
@@ -434,43 +437,61 @@ class HaksnbotAgent:
             logger.error(f"Error getting Claude response: {e}")
 
     async def run(self):
-        """Main event loop."""
+        """Main event loop with persistent tail process."""
         await self.start()
 
         if not self.running:
             return
 
-        logger.info("Entering main event loop...")
+        # Start persistent tail on server log
+        self.tail_process = await self.start_log_tail()
+
+        logger.info("Entering main event loop (persistent tail)...")
 
         try:
+            # Read lines continuously from tail process
             while self.running:
-                # Wait for next event from server logs
-                event = await self.wait_for_event()
+                if self.tail_process.stdout is None:
+                    logger.error("Tail process stdout is None")
+                    break
 
+                # Read next line (blocks until available)
+                line_bytes = await self.tail_process.stdout.readline()
+
+                if not line_bytes:
+                    # EOF - tail process died
+                    logger.warning("Tail process ended, restarting...")
+                    self.tail_process = await self.start_log_tail()
+                    continue
+
+                line = line_bytes.decode().strip()
+                if not line:
+                    continue
+
+                # Filter: skip private/technical lines
+                if not self.should_forward_line(line):
+                    continue
+
+                # Parse and handle the event
+                event = self.parse_log_line(line)
                 if not event:
                     continue
 
                 event_type = event.get("type")
+                content = event.get("content", "")
 
-                if event_type == "activity":
-                    await self.handle_activity(event.get("content", ""))
-
-                elif event_type == "player_join":
-                    # Log locally, but also forward to Claude
+                if event_type == "player_join":
                     logger.info(f"Player joined: {event.get('username')}")
-                    await self.handle_activity(f"{event.get('username')} joined the game")
-
                 elif event_type == "player_leave":
-                    # Log locally, but also forward to Claude
                     logger.info(f"Player left: {event.get('username')}")
-                    await self.handle_activity(f"{event.get('username')} left the game")
 
-                elif event_type == "timeout":
-                    # No events in 60s, just continue
-                    pass
+                # Forward all events to Claude
+                await self.handle_activity(content)
 
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
         finally:
             await self.stop()
 
