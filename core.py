@@ -333,8 +333,9 @@ class HaksnbotAgent:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.touch()
 
+        # Use stdbuf to disable output buffering (tail buffers when not on tty)
         process = await asyncio.create_subprocess_exec(
-            "tail", "-n", "0", "-f", str(log_file),
+            "stdbuf", "-oL", "tail", "-n", "0", "-f", str(log_file),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
