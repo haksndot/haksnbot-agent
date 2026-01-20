@@ -327,15 +327,15 @@ class HaksnbotAgent:
         logger.info("Haksnbot Agent stopped")
 
     async def start_tail(self, log_file: Path) -> asyncio.subprocess.Process:
-        """Start persistent tail -f on a log file."""
+        """Start persistent tail -f on a log file with fast polling."""
         # Ensure the file exists (create if needed for bot log)
         if not log_file.exists():
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.touch()
 
-        # Use stdbuf to disable output buffering (tail buffers when not on tty)
+        # Use stdbuf for line buffering, -s 0.01 for 10ms poll interval
         process = await asyncio.create_subprocess_exec(
-            "stdbuf", "-oL", "tail", "-n", "0", "-f", str(log_file),
+            "stdbuf", "-oL", "tail", "-n", "0", "-s", "0.01", "-f", str(log_file),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -526,8 +526,8 @@ class HaksnbotAgent:
                     elif event_type == "player_leave":
                         logger.info(f"Player left: {event.get('username')}")
 
-                    # Forward to Claude
-                    await self.handle_activity(content)
+                    # Forward to Claude (non-blocking)
+                    asyncio.create_task(self.handle_activity(content))
 
                 elif source == "bot":
                     # Bot messages are already filtered (only chat/system)
@@ -540,8 +540,8 @@ class HaksnbotAgent:
 
                     if event_type == "bot_system":
                         logger.info(f"[Bot received] {content}")
-                        # Forward system messages (command responses) to Claude
-                        await self.handle_activity(f"[Bot received] {content}")
+                        # Forward system messages (command responses) to Claude (non-blocking)
+                        asyncio.create_task(self.handle_activity(f"[Bot received] {content}"))
                     # Note: bot_chat is likely duplicate of server log, skip it
 
         except KeyboardInterrupt:
