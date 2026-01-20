@@ -6,6 +6,7 @@ Uses persistent tail on server log for event detection, minecraft-mcp for bot ac
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -32,9 +33,10 @@ MINECRAFT_MCP = REPO_DIR / "minecraft-mcp" / "src" / "index.js"
 SERVER_ADMIN_MCP = REPO_DIR / "server-admin-mcp" / "src" / "index.js"
 MEMORY_MCP = REPO_DIR / "memory-mcp" / "src" / "index.js"
 MAP_MCP = REPO_DIR / "map-mcp" / "src" / "index.js"
-LOG_FILE = Path("/home/haksndot/server/logs/latest.log")
+SERVER_LOG = Path("/home/haksndot/server/logs/latest.log")
+BOT_LOG = AGENT_DIR / "data" / "bot-messages.log"
 
-# Patterns to filter out (private/technical noise)
+# Patterns to filter out from server log (private/technical noise)
 SKIP_PATTERNS = [
     "issued server command:",  # Player commands (private)
     "UUID of player",          # Connection technical details
@@ -128,7 +130,9 @@ class HaksnbotAgent:
         self.config = config or load_config()
         self.client: Optional[ClaudeSDKClient] = None
         self.running = False
-        self.tail_process: Optional[asyncio.subprocess.Process] = None
+        self.server_tail: Optional[asyncio.subprocess.Process] = None
+        self.bot_tail: Optional[asyncio.subprocess.Process] = None
+        self.event_queue: Optional[asyncio.Queue] = None
 
     async def start(self):
         """Start the agent."""
@@ -307,13 +311,14 @@ class HaksnbotAgent:
         logger.info("Stopping Haksnbot Agent...")
         self.running = False
 
-        # Stop tail process
-        if self.tail_process:
-            self.tail_process.terminate()
-            try:
-                await asyncio.wait_for(self.tail_process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self.tail_process.kill()
+        # Stop tail processes
+        for proc in [self.server_tail, self.bot_tail]:
+            if proc:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
 
         # Close SDK client (MCP server terminates and bot disconnects automatically)
         if self.client:
@@ -321,21 +326,39 @@ class HaksnbotAgent:
 
         logger.info("Haksnbot Agent stopped")
 
-    async def start_log_tail(self) -> asyncio.subprocess.Process:
-        """Start persistent tail -f on server log."""
+    async def start_tail(self, log_file: Path) -> asyncio.subprocess.Process:
+        """Start persistent tail -f on a log file."""
+        # Ensure the file exists (create if needed for bot log)
+        if not log_file.exists():
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.touch()
+
         process = await asyncio.create_subprocess_exec(
-            "tail", "-n", "0", "-f", str(LOG_FILE),
+            "tail", "-n", "0", "-f", str(log_file),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        logger.info(f"Started tail process on {LOG_FILE}")
+        logger.info(f"Started tail on {log_file}")
         return process
 
-    def should_forward_line(self, line: str) -> bool:
-        """Check if a log line should be forwarded to Claude.
+    async def tail_reader(self, process: asyncio.subprocess.Process, source: str):
+        """Read lines from a tail process and put them in the event queue."""
+        while self.running and process.stdout:
+            try:
+                line_bytes = await process.stdout.readline()
+                if not line_bytes:
+                    # EOF - process died
+                    logger.warning(f"Tail process for {source} ended")
+                    break
+                line = line_bytes.decode().strip()
+                if line:
+                    await self.event_queue.put((source, line))
+            except Exception as e:
+                logger.error(f"Error reading from {source} tail: {e}")
+                break
 
-        Filters out private/technical noise, only forwards public activity.
-        """
+    def should_forward_server_line(self, line: str) -> bool:
+        """Check if a server log line should be forwarded to Claude."""
         # Only forward INFO lines
         if "/INFO]: " not in line:
             return False
@@ -347,11 +370,8 @@ class HaksnbotAgent:
 
         return True
 
-    def parse_log_line(self, line: str) -> Optional[dict]:
-        """Parse a Minecraft server log line into an event.
-
-        Extract the content and detect join/leave for logging purposes.
-        """
+    def parse_server_line(self, line: str) -> Optional[dict]:
+        """Parse a Minecraft server log line into an event."""
         # Extract message content after "]: "
         if "]: " in line:
             content = line.split("]: ", 1)[-1]
@@ -361,7 +381,7 @@ class HaksnbotAgent:
         if not content.strip():
             return None
 
-        # Detect join/leave for logging (but still forward to Claude as activity)
+        # Detect join/leave for logging
         if "joined the game" in content:
             username = content.replace(" joined the game", "").strip()
             return {"type": "player_join", "username": username, "content": content.strip()}
@@ -370,8 +390,24 @@ class HaksnbotAgent:
             username = content.replace(" left the game", "").strip()
             return {"type": "player_leave", "username": username, "content": content.strip()}
 
-        # Forward everything else as server activity
         return {"type": "activity", "content": content.strip()}
+
+    def parse_bot_line(self, line: str) -> Optional[dict]:
+        """Parse a bot message log line (JSON format) into an event."""
+        try:
+            data = json.loads(line)
+            msg_type = data.get("type", "system")
+            content = data.get("content", "")
+
+            if msg_type == "chat":
+                user = data.get("user", "Unknown")
+                return {"type": "bot_chat", "content": f"<{user}> {content}", "user": user}
+            else:
+                # System message (command response, etc.)
+                return {"type": "bot_system", "content": content}
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse bot log line: {line}")
+            return None
 
     def log_sdk_message(self, msg):
         """Log SDK message in human-readable format."""
@@ -437,62 +473,84 @@ class HaksnbotAgent:
             logger.error(f"Error getting Claude response: {e}")
 
     async def run(self):
-        """Main event loop with persistent tail process."""
+        """Main event loop with dual-stream log tailing."""
         await self.start()
 
         if not self.running:
             return
 
-        # Start persistent tail on server log
-        self.tail_process = await self.start_log_tail()
+        # Create event queue for both log streams
+        self.event_queue = asyncio.Queue()
 
-        logger.info("Entering main event loop (persistent tail)...")
+        # Start tail processes for both logs
+        self.server_tail = await self.start_tail(SERVER_LOG)
+        self.bot_tail = await self.start_tail(BOT_LOG)
+
+        # Start reader tasks for both streams
+        server_reader = asyncio.create_task(
+            self.tail_reader(self.server_tail, "server")
+        )
+        bot_reader = asyncio.create_task(
+            self.tail_reader(self.bot_tail, "bot")
+        )
+
+        logger.info("Entering main event loop (dual-stream)...")
 
         try:
-            # Read lines continuously from tail process
             while self.running:
-                if self.tail_process.stdout is None:
-                    logger.error("Tail process stdout is None")
-                    break
-
-                # Read next line (blocks until available)
-                line_bytes = await self.tail_process.stdout.readline()
-
-                if not line_bytes:
-                    # EOF - tail process died
-                    logger.warning("Tail process ended, restarting...")
-                    self.tail_process = await self.start_log_tail()
+                # Wait for next event from either stream
+                try:
+                    source, line = await asyncio.wait_for(
+                        self.event_queue.get(),
+                        timeout=60.0
+                    )
+                except asyncio.TimeoutError:
                     continue
 
-                line = line_bytes.decode().strip()
-                if not line:
-                    continue
+                # Process based on source
+                if source == "server":
+                    # Filter server log lines
+                    if not self.should_forward_server_line(line):
+                        continue
 
-                # Filter: skip private/technical lines
-                if not self.should_forward_line(line):
-                    continue
+                    event = self.parse_server_line(line)
+                    if not event:
+                        continue
 
-                # Parse and handle the event
-                event = self.parse_log_line(line)
-                if not event:
-                    continue
+                    event_type = event.get("type")
+                    content = event.get("content", "")
 
-                event_type = event.get("type")
-                content = event.get("content", "")
+                    if event_type == "player_join":
+                        logger.info(f"Player joined: {event.get('username')}")
+                    elif event_type == "player_leave":
+                        logger.info(f"Player left: {event.get('username')}")
 
-                if event_type == "player_join":
-                    logger.info(f"Player joined: {event.get('username')}")
-                elif event_type == "player_leave":
-                    logger.info(f"Player left: {event.get('username')}")
+                    # Forward to Claude
+                    await self.handle_activity(content)
 
-                # Forward all events to Claude
-                await self.handle_activity(content)
+                elif source == "bot":
+                    # Bot messages are already filtered (only chat/system)
+                    event = self.parse_bot_line(line)
+                    if not event:
+                        continue
+
+                    event_type = event.get("type")
+                    content = event.get("content", "")
+
+                    if event_type == "bot_system":
+                        logger.info(f"[Bot received] {content}")
+                        # Forward system messages (command responses) to Claude
+                        await self.handle_activity(f"[Bot received] {content}")
+                    # Note: bot_chat is likely duplicate of server log, skip it
 
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
         except Exception as e:
             logger.error(f"Error in main loop: {e}")
         finally:
+            # Cancel reader tasks
+            server_reader.cancel()
+            bot_reader.cancel()
             await self.stop()
 
 
