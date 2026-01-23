@@ -45,6 +45,7 @@ SKIP_PATTERNS = [
     "GameProfile",             # Auth details
     "[QuickShop-Hikari]",      # Plugin spam
     "[Essentials]",            # Essentials plugin output (sell, balance, etc.)
+    "[GriefPrevention]",       # Claim/sign activity (private)
     "CONSOLE issued",          # Console commands
 ]
 
